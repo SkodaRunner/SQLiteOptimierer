@@ -4,6 +4,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Text;
+using IniRW;
 
 /// <summary>
 /// Hauptprogramm zur Analyse und Bereinigung von Duplikaten in einer SQLite-Datenbank
@@ -11,11 +12,43 @@ using System.Text;
 class Program
 {
     // Da Logger ein Instanzfeld ist, muss es static sein, damit es in static Methoden verwendet werden kann.
-    static LogWriter.LogWriter Logger = new LogWriter.LogWriter("", sDateTimeLogger, -1);
     static string sDateTimeLogger = DateTime.Now.ToString("yyyy-MM-dd HH-mm");
+    static LogWriter.LogWriter Logger = new LogWriter.LogWriter("", sDateTimeLogger, -1);
+    static IniFile MyIni = new IniFile();
+
+    private static string ValidatePath(string path)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(path))
+                return path;
+
+            const string defaultPath = @"EPG.sqlite";
+            MyIni.Write("Path",defaultPath);
+            return defaultPath;
+        }
+        catch (Exception ex)
+        {
+            LogError("ValidatePath",ex,Thread.CurrentThread.ManagedThreadId);
+            return @"EPG.sqlite";
+        }
+    }
     static void Main()
     {
-        string dbPath = "EPG.sqlite";
+        string dbPath;
+        try
+        {
+            dbPath = ValidatePath(MyIni.Read("Path"));
+        }
+        catch (Exception ex)
+        {
+            const string defaultPath = @"EPG.sqlite";
+            LogWarn("[WARN] Path reset to default.");
+            MyIni.Write("Path",defaultPath);
+            LogError("Main",ex,Thread.CurrentThread.ManagedThreadId);
+            return;
+        }
+
         using var connection = new SqliteConnection($"Data Source={dbPath}");
         connection.Open();
 
@@ -150,7 +183,7 @@ class Program
                 }
             }
 
-            LogInfo($"\nFertig ✅ Ergebnisse in '{outputFile}' gespeichert.");
+            LogInfo($"Fertig ✅ Ergebnisse in '{outputFile}' gespeichert.");
 
             // Abschließende Datenbankoptimierung
             using (var cmd = new SqliteCommand("VACUUM",connection)) cmd.ExecuteNonQuery();
