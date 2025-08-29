@@ -1,138 +1,277 @@
 ﻿using Microsoft.Data.Sqlite;
-using Microsoft.VisualBasic;
+using SQLitePCL;
 using System;
-using System.Data.Common;
-using System.Data.SQLite;
 using System.IO;
+using System.Linq;
 using System.Text;
 
+/// <summary>
+/// Hauptprogramm zur Analyse und Bereinigung von Duplikaten in einer SQLite-Datenbank
+/// </summary>
 class Program
 {
+    // Da Logger ein Instanzfeld ist, muss es static sein, damit es in static Methoden verwendet werden kann.
+    static LogWriter.LogWriter Logger = new LogWriter.LogWriter("", sDateTimeLogger, -1);
+    static string sDateTimeLogger = DateTime.Now.ToString("yyyy-MM-dd HH-mm");
     static void Main()
     {
         string dbPath = "EPG.sqlite";
         using var connection = new SqliteConnection($"Data Source={dbPath}");
         connection.Open();
 
-        Console.WriteLine("Verbindung erfolgreich hergestellt.\n");
+        LogInfo("Verbindung erfolgreich hergestellt.");
 
+        // Schema in Markdown exportieren
         string schemaMarkdown = GetDatabaseSchemaMarkdown(connection);
         File.WriteAllText("schema.md",schemaMarkdown,Encoding.UTF8);
 
-        Console.WriteLine("Schema wurde in 'schema.md' exportiert.\n");
+        LogInfo("Schema wurde in 'schema.md' exportiert.");
         LookForDoubles(connection);
     }
 
-    static void LookForDoubles(Microsoft.Data.Sqlite.SqliteConnection connection)
+    /// <summary>
+    /// Hauptfunktion zur Duplikatsuche und -bereinigung in der Datenbank.
+    /// Prüft Templates-Tabelle auf Duplikate und Überschneidungen mit GeneralDonts.
+    /// </summary>
+    /// <param name="connection">Aktive Datenbankverbindung</param>
+    /// 
+    private static void LogWarn(string message)
     {
-       
-        using var cmd = new Microsoft.Data.Sqlite.SqliteCommand("SELECT CASE WHEN Name IS NOT NULL AND Name <> '' THEN Name ELSE Template END AS DisplayName, Donts,TemplateID FROM Templates;", connection);
-        using var reader = cmd.ExecuteReader();
-        string outputFile = "duplicates.txt";
-        using var writer = new StreamWriter(outputFile, false);
-
-        while (reader.Read())
-        {
-            string displayName = reader.GetString(0);
-            string feld = reader.IsDBNull(1) ? "" : reader.GetString(1);
-            string id = reader.GetInt32(2).ToString();
-
-            var items = feld.Split(';', StringSplitOptions.RemoveEmptyEntries);
-            var duplicates = items.GroupBy(x => x.Trim())
-                  .Where(g => g.Count() > 1)
-                  .Select(g => g.Key);
-
-            if (duplicates.Any())
-            {
-                string message =$"Datensatz {displayName} hat Dubletten: {string.Join(", ",duplicates)}";
-                Console.WriteLine(message);
-                writer.WriteLine(message);
-            }
-
-            // Liste splitten, trimmen, Duplikate entfernen und sortieren
-            var cleaned = feld.Split(';', StringSplitOptions.RemoveEmptyEntries)
-                              .Select(x => x.Trim())
-                              .Distinct(StringComparer.OrdinalIgnoreCase) // case-insensitive
-                              //.OrderBy(x => x)                            // optional sortieren
-                              .ToArray();
-
-            string cleanedString = string.Join(";", cleaned);
-
-            // Nur updaten, wenn sich was geändert hat
-            if (cleanedString != feld)
-            {
-                using var updateCmd = new Microsoft.Data.Sqlite.SqliteCommand(
-                    $"UPDATE Templates SET Donts = @val WHERE TemplateID = @id;", connection);
-                updateCmd.Parameters.AddWithValue("@val",cleanedString);
-                updateCmd.Parameters.AddWithValue("@id",id);
-                updateCmd.ExecuteNonQuery();
-
-                string message =$"Datensatz {id} bereinigt: {cleanedString}";
-                Console.WriteLine(message);
-                writer.WriteLine(message);
-            }
-
-        }
-
-        // 1. Alle GeneralDonts in ein HashSet laden (schnelle Nachschlage-Struktur)
-        var generalDonts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        using (var cmd2 = new SqliteCommand("SELECT Template FROM GeneralDonts;",connection))
-        using (var reader2 = cmd2.ExecuteReader())
-        {
-            while (reader2.Read())
-            {
-                if (!reader2.IsDBNull(0))
-                {
-                    string val = reader2.GetString(0).Trim();
-                    if (!string.IsNullOrEmpty(val))
-                        generalDonts.Add(val);
-                }
-            }
-        }
-
-        Console.WriteLine($"GeneralDonts geladen: {generalDonts.Count} Werte\n");
-        writer.WriteLine($"GeneralDonts geladen: {generalDonts.Count} Werte\n");
-
-        // 2. Templates.Donts prüfen
-        using var selectCmd = new SqliteCommand("SELECT CASE WHEN Name IS NOT NULL AND Name <> '' THEN Name ELSE Template END AS DisplayName, Donts FROM Templates;", connection);
-        using var tReader = selectCmd.ExecuteReader();
-
-        while (tReader.Read())
-        {
-            string id = tReader.GetString(0);
-            string donts = tReader.IsDBNull(1) ? "" : tReader.GetString(1);
-
-            var items = donts.Split(';', StringSplitOptions.RemoveEmptyEntries)
-                             .Select(x => x.Trim());
-
-            // Schnittmenge finden
-            var duplicates = items.Where(x => generalDonts.Contains(x)).ToList();
-
-            if (duplicates.Any())
-            {
-                string message = $"Template {id} hat Überschneidungen: {string.Join(", ", duplicates)}";
-                Console.WriteLine(message);
-                writer.WriteLine(message);
-            }
-        }
-
-        Console.WriteLine($"\nFertig ✅ Ergebnisse in '{outputFile}' gespeichert.");
-
-        //connection.Open();
-        //using var updateCmd2 = new Microsoft.Data.Sqlite.SqliteCommand("VACUUM");
-        //updateCmd2.ExecuteNonQuery();
-
-        //using var updateCmd3 = new Microsoft.Data.Sqlite.SqliteCommand("PRAGMA optimize");
-        //updateCmd3.ExecuteNonQuery();
+        string warnMessage = $"{GetNow()} [WARN] {message}";
+        Console.WriteLine(warnMessage);
+        Logger.LogWrite(warnMessage,Thread.CurrentThread.ManagedThreadId);
     }
 
+    // Ändere die LogInfo-Methode zu static, damit sie im static Kontext von Main aufgerufen werden kann.
+    private static void LogInfo(string message)
+    {
+        string warnMessage = $"{GetNow()} [INFO] {message}";
+        Console.WriteLine(warnMessage);
+        Logger.LogWrite(warnMessage,Thread.CurrentThread.ManagedThreadId);
+    }
+
+    // Ändere auch GetNow zu static, da es von LogInfo verwendet wird.
+    private static string GetNow()
+    {
+        return DateTime.Now.ToString("HH:mm:ss") + ": ";
+    }
+
+    private static void LogError(string methodName,Exception ex,int thread)
+    {
+        string errorMessage = $"{GetNow()} [ERROR]: in {methodName}: {ex.Message} ({ex.InnerException})";
+        Console.WriteLine(errorMessage);
+        Logger.LogWrite(errorMessage,Thread.CurrentThread.ManagedThreadId);
+    }
+    static void LookForDoubles(SqliteConnection connection)
+    {
+        string outputFile = "duplicates.txt";
+        using var writer = new StreamWriter(outputFile, false);
+        try
+        {
+            // Phase 1: Duplikate in Templates-Feldern finden und bereinigen
+            using (var cmd = new SqliteCommand(
+                @"SELECT CASE WHEN Name IS NOT NULL AND Name <> '' THEN Name ELSE Template END AS DisplayName,
+                    Donts, TemplateID, descDont, NotChannel FROM Templates",connection))
+            using (var reader = cmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    string displayName = reader.GetString(0);
+                    string feldDonts = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                    string feldDescDonts = reader.IsDBNull(3) ? "" : reader.GetString(3);
+                    string feldNotChannel = reader.IsDBNull(4) ? "" : reader.GetString(4);
+                    string id = reader.GetInt32(2).ToString();
+
+                    // Prüfe jedes Feld auf interne Duplikate
+                    ProcessFieldDuplicates(displayName,feldDonts,"Donts",id,connection,writer);
+                    ProcessFieldDuplicates(displayName,feldDescDonts,"descDont",id,connection,writer);
+                    ProcessFieldDuplicates(displayName,feldNotChannel,"NotChannel",id,connection,writer);
+                }
+            }
+
+            // Phase 2: Daten aus GeneralDonts laden
+            var generalDontsChannel = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var generalDontsTemplate = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // Channel laden
+            using (var cmd = new SqliteCommand("SELECT Channel FROM GeneralDonts",connection))
+            using (var reader = cmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (!reader.IsDBNull(0))
+                    {
+                        string val = reader.GetString(0).Trim();
+                        if (!string.IsNullOrEmpty(val))
+                            generalDontsChannel.Add(val);
+                    }
+                }
+            }
+
+            // Template laden
+            using (var cmd = new SqliteCommand("SELECT Template FROM GeneralDonts",connection))
+            using (var reader = cmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (!reader.IsDBNull(0))
+                    {
+                        string val = reader.GetString(0).Trim();
+                        if (!string.IsNullOrEmpty(val))
+                            generalDontsTemplate.Add(val);
+                    }
+                }
+            }
+
+            LogInfo($"GeneralDonts Channel geladen: {generalDontsChannel.Count} Werte");
+            LogInfo($"GeneralDonts Template geladen: {generalDontsTemplate.Count} Werte\n");
+
+
+            // Phase 3: Überschneidungen prüfen
+            using (var cmd = new SqliteCommand(
+                @"SELECT CASE WHEN Name IS NOT NULL AND Name <> '' THEN Name ELSE Template END AS DisplayName,
+                    NotChannel, descDont, Donts, TemplateID FROM Templates",connection))
+            using (var reader = cmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    string displayName = reader.GetString(0);
+                    string notChannel = reader.IsDBNull(1) ? "" : reader.GetString(1);
+                    string descDont = reader.IsDBNull(2) ? "" : reader.GetString(2);
+                    string donts = reader.IsDBNull(3) ? "" : reader.GetString(3);
+                    string id = reader.GetInt32(4).ToString();
+
+                    // Prüfe NotChannel gegen GeneralDonts.Channel
+                    CheckAndRemoveOverlaps(displayName,notChannel,"NotChannel",id,generalDontsChannel,"Channel",connection,writer);
+                    // Prüfe descDont gegen GeneralDonts.Template
+                    CheckAndRemoveOverlaps(displayName,descDont,"descDont",id,generalDontsTemplate,"Template",connection,writer);
+                    // Prüfe Donts gegen GeneralDonts.Template
+                    CheckAndRemoveOverlaps(displayName,donts,"Donts",id,generalDontsTemplate,"Template",connection,writer);
+                }
+            }
+
+            LogInfo($"\nFertig ✅ Ergebnisse in '{outputFile}' gespeichert.");
+
+            // Abschließende Datenbankoptimierung
+            using (var cmd = new SqliteCommand("VACUUM",connection)) cmd.ExecuteNonQuery();
+            using (var cmd = new SqliteCommand("PRAGMA optimize",connection)) cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            string message = $"Fehler {ex.Message} ({ex.InnerException})";
+            LogError(message,ex,Thread.CurrentThread.ManagedThreadId);
+        }
+    }
+
+    /// <summary>
+    /// Prüft ein einzelnes Feld auf Duplikate und bereinigt diese.
+    /// </summary>
+    /// <param name="displayName">Anzeigename des Datensatzes</param>
+    /// <param name="fieldValue">Zu prüfender Feldwert (;-getrennte Liste)</param>
+    /// <param name="fieldName">Name des Datenbankfeldes</param>
+    /// <param name="id">TemplateID des Datensatzes</param>
+    /// <param name="connection">Aktive Datenbankverbindung</param>
+    /// <param name="writer">StreamWriter für die Protokollierung</param>
+    private static void ProcessFieldDuplicates(string displayName,string fieldValue,string fieldName,string id,
+        SqliteConnection connection,StreamWriter writer)
+    {
+        // Aufteilen des Feldwerts in einzelne Einträge und Suche nach Duplikaten
+        var items = fieldValue.Split(';', StringSplitOptions.RemoveEmptyEntries);
+        var duplicates = items.GroupBy(x => x.Trim())
+                            .Where(g => g.Count() > 1)
+                            .Select(g => g.Key)
+                            .ToArray();
+
+        // Gefundene Duplikate protokollieren
+        if (duplicates.Any())
+        {
+            string message = $"Datensatz {displayName} hat Dubletten in {fieldName}: {string.Join(", ", duplicates)}";
+            LogWarn(message);
+        }
+
+        // Bereinigung: Trimmen und Duplikate entfernen
+        var cleanedItems = items.Select(x => x.Trim())
+                               .Distinct(StringComparer.OrdinalIgnoreCase)
+                               .ToArray();
+        string cleanedString = string.Join(";", cleanedItems);
+
+        // Nur updaten wenn sich der Wert geändert hat
+        if (cleanedString != fieldValue)
+        {
+            using var updateCmd = new SqliteCommand($"UPDATE Templates SET {fieldName} = @val WHERE TemplateID = @id", connection);
+            updateCmd.Parameters.AddWithValue("@val",cleanedString);
+            updateCmd.Parameters.AddWithValue("@id",id);
+            updateCmd.ExecuteNonQuery();
+
+            string message = $"Datensatz {displayName} {fieldName} bereinigt: \nEntfernte Dubletten: [{string.Join(", ", duplicates)}]\n" +
+                           $"vorher: \"{fieldValue}\"\nhinterher \"{cleanedString}\"\n";
+            LogWarn(message);
+
+        }
+    }
+
+    /// <summary>
+    /// Prüft auf Überschneidungen zwischen einem Template-Feld und GeneralDonts.Channel
+    /// und entfernt diese Überschneidungen.
+    /// </summary>
+    /// <param name="displayName">Anzeigename des Datensatzes</param>
+    /// <param name="fieldValue">Zu prüfender Feldwert (;-getrennte Liste)</param>
+    /// <param name="fieldName">Name des Datenbankfeldes</param>
+    /// <param name="id">TemplateID des Datensatzes</param>
+    /// <param name="generalDontsChannel">Set mit allen Channel-Werten aus GeneralDonts</param>
+    /// <param name="connection">Aktive Datenbankverbindung</param>
+    /// <param name="writer">StreamWriter für die Protokollierung</param>
+    private static void CheckAndRemoveOverlaps(string displayName,string fieldValue,string fieldName,string id,
+        HashSet<string> generalDontsValues,string generalDontsField,SqliteConnection connection,StreamWriter writer)
+    {
+        // Aufteilen und Trimmen der Einträge
+        var items = fieldValue.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                            .Select(x => x.Trim());
+
+        // Überschneidungen mit GeneralDonts finden
+        var overlaps = items.Where(x => generalDontsValues.Contains(x))
+                           .Distinct(StringComparer.OrdinalIgnoreCase)
+                           .ToArray();
+
+        // Gefundene Überschneidungen protokollieren
+        if (overlaps.Any())
+        {
+            string message = $"Template {displayName} hat Überschneidungen: {string.Join(", ", overlaps)} zwischen Templates-{fieldName} und General-Donts-{generalDontsField}\n";
+            LogWarn(message);
+        }
+
+        // Bereinigung: Überschneidungen entfernen
+        var cleanedItems = items.Where(x => !generalDontsValues.Contains(x))
+                               .Distinct(StringComparer.OrdinalIgnoreCase)
+                               .ToArray();
+        string cleanedString = string.Join(";", cleanedItems);
+
+        // Nur updaten wenn sich der Wert geändert hat
+        if (cleanedString != fieldValue)
+        {
+            using var updateCmd = new SqliteCommand($"UPDATE Templates SET {fieldName} = @val WHERE TemplateID = @id", connection);
+            updateCmd.Parameters.AddWithValue("@val",cleanedString);
+            updateCmd.Parameters.AddWithValue("@id",id);
+            updateCmd.ExecuteNonQuery();
+
+            string message = $"Template {displayName}: GeneralDonts.{generalDontsField} entfernt aus {fieldName}.\nVorher: '{fieldValue}'\nNachher: '{cleanedString}'\n";
+            LogWarn(message);
+        }
+    }
+
+    /// <summary>
+    /// Exportiert das Datenbankschema in Markdown-Format.
+    /// Listet alle Tabellen und deren Spalten mit Datentypen auf.
+    /// </summary>
+    /// <param name="connection">Aktive Datenbankverbindung</param>
+    /// <returns>Markdown-formatierte Beschreibung des Datenbankschemas</returns>
     static string GetDatabaseSchemaMarkdown(SqliteConnection connection)
     {
         var sb = new StringBuilder();
         sb.AppendLine("# Datenbankschema\n");
 
-        using var listTables = new SqliteCommand("SELECT name FROM sqlite_master WHERE type='table';", connection);
+        // Alle Tabellen auflisten
+        using var listTables = new SqliteCommand("SELECT name FROM sqlite_master WHERE type='table'", connection);
         using var reader = listTables.ExecuteReader();
 
         while (reader.Read())
@@ -142,7 +281,8 @@ class Program
             sb.AppendLine("| Spalte | Typ |");
             sb.AppendLine("|--------|-----|");
 
-            using var pragma = new SqliteCommand($"PRAGMA table_info({tableName});", connection);
+            // Spalteninformationen für jede Tabelle abrufen
+            using var pragma = new SqliteCommand($"PRAGMA table_info({tableName})", connection);
             using var colReader = pragma.ExecuteReader();
 
             while (colReader.Read())
